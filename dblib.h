@@ -1,6 +1,19 @@
 /* check  man dbopen  */
 #include <stdio.h>
 
+#define T 3
+#define KEY_SIZE 50
+#define DATA_SIZE 1024
+
+struct Chunk {
+    bool leaf;
+    int n;
+    size_t offset;
+    size_t childs[2 * T];
+    char keys[2 * T - 1][KEY_SIZE];
+    char data[2 * T][DATA_SIZE];
+};
+
 struct DBT {
     void  *data;
     size_t size;
@@ -20,17 +33,16 @@ struct DBC{
 
 struct DB_Header {
     struct DBC main_settings;
-    size_t min_deg;
     size_t root_offset;
     size_t ff_offset; // first free
 };
 
 struct DB {
     /* Public API */
-    int (*close)(const struct DB *db);
-    int (*del)(const struct DB *db, const struct DBT *key);
-    int (*get)(const struct DB *db, struct DBT *key, struct DBT *data);
-    int (*put)(const struct DB *db, struct DBT *key, const struct DBT *data);
+    int (*close)(struct DB *db);
+    int (*del)(struct DB *db, const struct DBT *key);
+    int (*get)(const struct DB *db, const struct DBT *key, struct DBT *data);
+    int (*put)(struct DB *db, const struct DBT *key, const struct DBT *data);
     //int (*sync)(const struct DB *db);
     /* Private API */
     int (*read)(const struct DB *db, char *dst, const size_t size, const size_t offset);
@@ -41,4 +53,5 @@ struct DB {
 }; /* Need for supporting multiple backends (HASH/BTREE) */
 
 struct DB *dbcreate(const char *file, const struct DBC *conf);
-struct DB *dbopen  (const char *file); /* Metadata in file */
+struct DB *dbopen(const char *file); /* Metadata in file */
+
