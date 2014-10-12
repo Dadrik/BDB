@@ -1,9 +1,9 @@
 /* check  man dbopen  */
 #include <stdio.h>
 
-#define T 3
-#define KEY_SIZE 50
-#define DATA_SIZE 1024
+#define T 100
+#define KEY_SIZE 32
+#define DATA_SIZE 64
 
 struct Chunk {
     bool leaf;
@@ -34,7 +34,7 @@ struct DBC{
 struct DB_Header {
     struct DBC main_settings;
     size_t root_offset;
-    size_t ff_offset; // first free
+    size_t ff_offset;
 };
 
 struct DB {

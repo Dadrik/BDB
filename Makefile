@@ -1,2 +1,2 @@
 all:
-	gcc dblib.c -shared -fPIC -o dblib.so
+	gcc dblib.c -std=c11 -shared -fPIC -o dblib.so
