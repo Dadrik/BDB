@@ -69,8 +69,6 @@ struct Chunk *node_read(struct DB *db, size_t offset) {
 
 void node_write(struct DB *db, struct Chunk *node) {
     const size_t chunk_size = db->header.main_settings.chunk_size;
-    // Handle changes
-    //if (node->modified) {
     // New header
     struct Chunk_Header header;
     header.leaf = node->leaf;
@@ -99,7 +97,6 @@ void node_write(struct DB *db, struct Chunk *node) {
     }
     free(node->raw_data);
     node->raw_data = (void *) modified_data;
-    //}
     dbwrite(db, (char *) node->raw_data, chunk_size, node->offset);
 }
 
@@ -166,7 +163,7 @@ void node_shift_right(struct Chunk *node, int index, int step, bool with_pointer
 // Get data by key
 
 int keycmp(const struct DBT *a, const struct DBT *b) {
-    size_t min_len = a->size > b->size ? b->size : a->size;
+    size_t min_len = (a->size > b->size) ? b->size : a->size;
     char *str_a = (char *) a->data, *str_b = (char *) b->data;
     for (int i = 0; i < min_len; i++) {
         if (str_a[i] < str_b[i])
@@ -174,19 +171,27 @@ int keycmp(const struct DBT *a, const struct DBT *b) {
         else if (str_a[i] > str_b[i])
             return 1;
     }
-    if (a->size > min_len)
+    if (a->size > min_len) {
         return 1;
-    else if (b->size > min_len)
+    } else if (b->size > min_len) {
         return -1;
-    else
+    } else {
         return 0;
+    }
 }
 
 struct DBT *search(struct DB *db, struct Chunk *node, struct DBT *key) {
+    //printf("node.offest = %d\n", node->offset);
     int index = 0;
     while (index < node->n && keycmp(key, &node->keys[index]) > 0) {
         index++;
     }
+    /*
+    if (index < node->n)
+        printf("now we at %s, that is greater or equal %s\n", node->keys[index].data, key->data);
+    else
+        printf("we are out of scope\n");
+    */
     if (index < node->n && keycmp(key, &node->keys[index]) == 0) {
         struct DBT *result = (struct DBT *) malloc(sizeof(*result));
         result->size = node->data[index].size;
@@ -204,15 +209,16 @@ struct DBT *search(struct DB *db, struct Chunk *node, struct DBT *key) {
     }
 }
 
+
 int dbget(struct DB *db, struct DBT *key, struct DBT *data) {
-    printf("searching %s: ", (char *) key->data);
+    //printf("searching %s: ", (char *) key->data);
     struct Chunk *root = node_read(db, db->header.root_offset);
     data = search(db, root, key); // search will free root
     if (data) {
-        printf("%s(%d)\n", (char *) data->data, (int) data->size);
+        //printf("%s(%d)\n", (char *) data->data, (int) data->size);
         return 0;
     } else {
-        printf("ERROR! Key not found\n");
+        printf("\nKey not found\n");
         return -1;
     }
 }
@@ -310,7 +316,7 @@ int insert(struct DB *db, struct Chunk *node, struct DBT *key, struct DBT *data)
 }
 
 int dbput(struct DB *db, struct DBT *key, struct DBT *data) {
-    printf("inserting %s - %s...\n", (char *) key->data, (char *) data->data);
+    //printf("inserting %s - %s...\n", (char *) key->data, (char *) data->data);
     if (key->size + data->size > db->header.main_settings.chunk_size / 2) {
         // Data size is invalid
         return 1;
@@ -331,10 +337,10 @@ int dbput(struct DB *db, struct DBT *key, struct DBT *data) {
 }
 
 // Delete data by key
-
 struct Chunk *exchange(struct DB *db, struct Chunk *node, int index, struct Chunk *donor, struct Chunk *acceptor, bool left) {
+    //printf("exchange func %s\n", left ? "left" : "right");
     // Edges
-    const int donor_index = left ? 0 : donor->n;
+    const int donor_index = left ? 0 : donor->n - 1;
     const int acceptor_index = left ? acceptor->n : 0;
     // Expand acceptor by 1
     node_shift_right(acceptor, acceptor_index, 1, true);
@@ -363,6 +369,7 @@ struct Chunk *exchange(struct DB *db, struct Chunk *node, int index, struct Chun
 }
 
 struct Chunk *merge(struct DB *db, struct Chunk *node, int index, struct Chunk *child, struct Chunk *neighbour, bool left) {
+    //printf("merge func %s\n", left ? "left" : "right");
     const int child_index = left ? T : 0;
     // Expand child by T
     node_shift_right(child, child_index, T, true);
@@ -372,12 +379,14 @@ struct Chunk *merge(struct DB *db, struct Chunk *node, int index, struct Chunk *
     // Shrink parent by 1
     if (left)
         node->childs[index + 1] = node->childs[index];
+    else if (index == node->n - 1)
+        node->childs[index] = node->childs[index + 1];
     node_shift_left(node, index, 1, true);
     // Copy data from neighbour to child
     for (int i = 0; i < T - 1; i++) {
         child->keys[i + child_index] = neighbour->keys[i];
         child->data[i + child_index] = neighbour->data[i];
-        child->childs[i + 1 + child_index] = neighbour->childs[i];
+        child->childs[i + child_index] = neighbour->childs[i];
     }
     child->childs[child_index + T - 1] = neighbour->childs[T - 1];
     // Save and free
@@ -389,21 +398,26 @@ struct Chunk *merge(struct DB *db, struct Chunk *node, int index, struct Chunk *
 }
 
 struct Chunk *fix_child(struct DB *db, struct Chunk *node, int index) {
+    //printf("fix child func\n");
     struct Chunk *child = node_read(db, node->childs[index]);
+    //printf("child.offset == %d, child.n == %d\n", child->offset, child->n);
     if (child->n >= T) {
+        node_free(node);
         return child;
     } else {
         struct Chunk *left, *right;
         if (index > 0) {
             left = node_read(db, node->childs[index - 1]);
+            //printf("left.offset == %d, left.n == %d\n", left->offset, left->n);
             if (left->n >= T) {
-                return exchange(db, node, index, left, child, false);
+                return exchange(db, node, index - 1, left, child, false);
             }
         } else {
             left = NULL;
         }
         if (index < node->n) {
             right = node_read(db, node->childs[index + 1]);
+            //printf("right.offset == %d, right.n == %d\n", right->offset, right->n);
             if (right->n >= T) {
                 node_free(left);
                 return exchange(db, node, index, right, child, true);
@@ -421,7 +435,8 @@ struct Chunk *fix_child(struct DB *db, struct Chunk *node, int index) {
 }
 
 struct DBT *pull_neighbour(struct DB *db, struct Chunk *node, bool left) {
-    int index = left ? 0 : node->n;
+    //printf("pull neibour func\n");
+    int index = left ? 0 : node->n - 1;
     if (node->leaf) {
         // Generating result (key + data)
         struct DBT *result = (struct DBT *) malloc(sizeof(*result) * 2);
@@ -437,17 +452,26 @@ struct DBT *pull_neighbour(struct DB *db, struct Chunk *node, bool left) {
         node_free(node);
         return result;
     } else {
-        struct Chunk *child = fix_child(db, node, index);
-        node_free(node);
+        struct Chunk *child = fix_child(db, node, index + (left ? 0 : 1));
         return pull_neighbour(db, child, left);
     }
 }
 
+
+// FIXME return -1 on failed delete
 int del(struct DB *db, struct Chunk *node, struct DBT *key) {
+    //printf("del func\n");
+    //printf("node.offest = %d\n", node->offset);
     int index = 0;
     while (index < node->n && keycmp(key, &node->keys[index]) > 0) {
         index++;
     }
+    /*
+    if (index < node->n)
+        printf("now we at %s, that is greater or equal %s\n", node->keys[index].data, key->data);
+    else
+        printf("we are out of scope\n");
+    */
     if (index < node->n && keycmp(key, &node->keys[index]) == 0) {
         if (node->leaf) {
             node_shift_left(node, index, 1, false);
@@ -483,7 +507,8 @@ int del(struct DB *db, struct Chunk *node, struct DBT *key) {
         }
     } else if (node->leaf) {
         node_free(node);
-        return -1;
+        printf("Not found\n");
+        return 0;
     } else {
         struct Chunk *child = fix_child(db, node, index);
         return del(db, child, key);
@@ -491,6 +516,7 @@ int del(struct DB *db, struct Chunk *node, struct DBT *key) {
 }
 
 int dbdel(struct DB *db, struct DBT *key) {
+    //printf("-------------------\ndeleting %s\n", (char *) key->data);
     struct Chunk *root = node_read(db, db->header.root_offset);
     return del(db, root, key);
 }
@@ -593,34 +619,32 @@ int db_put(struct DB *db, void *key, size_t key_len,
 
 /*
 int main() {
-    struct DBC myconf = {.db_size = 512 * 1024, .chunk_size = 4 * 1024};
+    struct DBC myconf = {.db_size = 512 * 256 * 1024, .chunk_size = 4 * 1024};
     struct DB *mydb = dbcreate("ololo.db", myconf);
-    char ololo[1000] = "aaaa", atata[1000] = "bbbb";
-    struct DBT k_ey = {.data = ololo, .size = 5};
-    struct DBT d_ata = {.data = atata, .size = 5};
-    for (int i = 0; i < 50; i++) {
-        mydb->put(mydb, &k_ey, &d_ata);
-        strcat(ololo, "a");
-        k_ey.data = ololo;
-        k_ey.size++;
+    struct DBT key, data;
+    key.data = malloc(128);
+    data.data = malloc(128);
+    FILE *keys, *values;
+    keys = fopen("data/keys.txt", "r");
+    values = fopen("data/values.txt", "r");
+    for (int i = 0; i < 10000; i++) {
+        fscanf(keys, "%s", key.data);
+        key.size = strlen(key.data) + 1;
+        fscanf(values, "%s", data.data);
+        data.size = strlen(data.data);
+        mydb->put(mydb, &key, &data);
     }
-    strcpy(ololo, "aaaaaaaaaaaaaaaaaaaaaaaaaaa");
-    k_ey.data = ololo, k_ey.size = 5;
-    struct DBT *res;
-    mydb->del(mydb, &k_ey);
-    mydb->get(mydb, &k_ey, &d_ata);
-    strcpy(ololo, "c");
-    strcpy(atata, "dddd");
-    k_ey.data = ololo;
-    k_ey.size = 2;
-    d_ata.data = atata;
-    d_ata.size = 5;
-    for (int i = 0; i < 50; i++) {
-        mydb->put(mydb, &k_ey, &d_ata);
-        strcat(ololo, "c");
-        k_ey.data = ololo;
-        k_ey.size++;
+    fclose(keys);
+    fclose(values);
+    keys = fopen("data/keys.txt", "r");
+    for (int i = 0; i < 1000; i++) {
+        fscanf(keys, "%s", key.data);
+        key.size = strlen(key.data) + 1;
+        mydb->del(mydb, &key);
     }
+    free(data.data);
+    free(key.data);
+    fclose(keys);
     mydb->close(mydb);
     return 0;
 }
