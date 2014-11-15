@@ -34,7 +34,17 @@ struct DBC{
     size_t chunk_size;
     /* Maximum memory size */
     /* 16MB by default */
-    //size_t mem_size;
+    size_t mem_size;
+};
+
+struct cache_list_node {
+    struct Chunk *node;
+    struct cache_list_node *next;
+};
+
+struct DB_Cache {
+    size_t n;
+    struct cache_list_node *head;
 };
 
 struct DB_Header {
@@ -55,6 +65,7 @@ struct DB {
     int (*write)(struct DB *db, char *src, size_t size, size_t offset);
     /* Meta */
     struct DB_Header header;
+    struct DB_Cache cache;
     int file;
 }; /* Need for supporting multiple backends (HASH/BTREE) */
 
