@@ -11,6 +11,7 @@ struct DBT {
 struct Chunk_Header {
     bool leaf;
     unsigned int n;
+    size_t LSN;
     size_t childs[2 * T];
 };
 
@@ -19,9 +20,10 @@ struct Chunk {
     size_t offset;
     bool leaf;
     unsigned int n;
+    size_t LSN;
     size_t childs[2 * T];
     struct DBT keys[2 * T - 1];
-    struct DBT data[2 * T];
+    struct DBT data[2 * T - 1];
 };
 
 
@@ -47,13 +49,38 @@ struct DB_Cache {
     struct cache_list_node *head;
 };
 
+struct Record {
+    unsigned LSN;
+    char op;
+    struct DBT key;
+    struct DBT data;
+    size_t chunk_offset;
+};
+
+struct Log {
+    int file;
+    struct Record record;
+};
+
+struct Log *log_open(char *filename);
+void log_close(struct Log *log);
+void log_write(struct Log *log, struct Record *record);
+void log_seek(struct Log *log);
+struct Record *log_read_next(struct Log *log);
+
 struct DB_Header {
     struct DBC main_settings;
     size_t root_offset;
     size_t ff_offset;
+    unsigned last_LSN;
 };
 
 struct DB {
+    /* Meta */
+    struct DB_Header header;
+    struct DB_Cache cache;
+    struct Log *log;
+    int file;
     /* Public API */
     int (*close)(struct DB *db);
     int (*del)(struct DB *db, struct DBT *key);
@@ -63,11 +90,7 @@ struct DB {
     /* Private API */
     int (*read)(struct DB *db, char *dst, size_t size, size_t offset);
     int (*write)(struct DB *db, char *src, size_t size, size_t offset);
-    /* Meta */
-    struct DB_Header header;
-    struct DB_Cache cache;
-    int file;
-}; /* Need for supporting multiple backends (HASH/BTREE) */
+};
 
 struct DB *dbcreate(char *file, struct DBC conf);
 struct DB *dbopen(char *file); /* Metadata in file */

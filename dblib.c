@@ -7,11 +7,6 @@
 
 #include "dblib.h"
 
-/*
-    TODO:
-    1) dbsize check
-*/
-
 // Read-Write operations
 
 int dbwrite(struct DB *db, char *src, size_t size, size_t offset) {
@@ -99,10 +94,28 @@ void node_write(struct DB *db, struct Chunk *node) {
     dbwrite(db, (char *) node->raw_data, chunk_size, node->offset);
 }
 
+int logwrite(struct Log *log, void *src, size_t size) {
+    ssize_t done = 0, part;
+    do {
+        part = write(log->file, (char *) src + done, size - done);
+        done += part;
+    } while (done < size);
+    return 0;
+}
 
-// Cache LRU
+int logread(struct Log *log, void *dst, const size_t size) {
+    ssize_t done = 0, part;
+    do {
+        part = read(log->file, (char *) dst + done, size - done);
+        if (part == 0)
+            return -1;
+        done += part;
+    } while (done < size);
+    return 0;
+}
 
-// FIXME
+// Free node
+
 void node_free(struct Chunk *node) {
     if (node) {
         free(node->raw_data);
@@ -110,17 +123,131 @@ void node_free(struct Chunk *node) {
     }
 }
 
-// FIXME
 void node_destroy(struct DB *db, struct Chunk *node) {
     dbwrite(db, (char *) &db->header.ff_offset, sizeof(db->header.ff_offset), node->offset);
     db->header.ff_offset = node->offset;
 }
+
+// Write Ahead Log
+
+struct Log *log_open(char *filename) {
+    struct Log *log = (struct Log *) malloc(sizeof(*log));
+    log->file = open(filename, O_WRONLY | O_CREAT | O_APPEND, S_IWUSR);
+    return log;
+}
+
+void log_close(struct Log *log) {
+    //TODO: while (log->records_queue) write_all
+    close(log->file);
+    free(log);
+}
+
+void log_write(struct Log *log, struct Record *record) {
+    size_t offset = 0, record_size = sizeof(record->LSN) + sizeof(record->op) + sizeof(record->chunk_offset) + record->key.size;
+    if (record->op != 'd')
+        record_size += record->data.size;
+    void *data = malloc(record_size);
+    memcpy(&(data[offset]), &(record->LSN), sizeof(record->LSN));
+    offset += sizeof(record->LSN);
+    memcpy(&(data[offset]), &(record->op), sizeof(record->op));
+    offset += sizeof(record->op);
+    memcpy(&(data[offset]), &(record->chunk_offset), sizeof(record->chunk_offset));
+    offset += sizeof(record->chunk_offset);
+    memcpy(&(data[offset]), record->key.data, record->key.size);
+    offset += sizeof(record->key.size);
+    if (record->op != 'd')
+        memcpy(&(data[offset]), record->data.data, record->data.size);
+    logwrite(log, data, record_size);
+    free(data);
+}
+
+void log_seek(struct Log *log) {
+    int32_t magic_number = 0xfeedabba;
+    size_t buf_size = 1024;
+    size_t latest_pos = 0;
+    __off_t pos = lseek(log->file, -buf_size, SEEK_SET);
+    char buf[buf_size];
+    ssize_t size;
+    while ((size = read(log->file, buf, buf_size)) >= sizeof(magic_number)) {
+        for (ssize_t i = size - sizeof(magic_number); i >= 0; i--) {
+            if (memcmp(buf + i, &magic_number, sizeof(magic_number)) == 0) {
+                lseek(log->file, pos + i, SEEK_SET);
+                return;
+            }
+        }
+        if (pos == 0)
+            break;
+        pos = lseek(log->file, -size - (buf_size + 1 - sizeof(magic_number)), SEEK_CUR);
+    }
+    lseek(log->file, 0, SEEK_SET);
+}
+
+struct Record *log_read_next(struct Log *log) {
+    struct Record *record = (struct Record *) malloc(sizeof(*record));
+    if (logread(log, &(record->LSN), sizeof(record->LSN)) < 0) {
+        free(record);
+        return NULL;
+    }
+    logread(log, &(record->op), sizeof(record->op));
+    logread(log, &(record->chunk_offset), sizeof(record->chunk_offset));
+    logread(log, &(record->key.size), sizeof(record->key.size));
+    record->key.data = malloc(record->key.size);
+    logread(log, record->key.data, record->key.size);
+    if (record->op != 'd') {
+        record->data.data = malloc(record->data.size);
+        logread(log, record->data.data, record->data.size);
+    }
+    return record;
+}
+
+void recovery(struct DB *db, char *filename) {
+    struct Log *log = (struct Log *) malloc(sizeof(*log));
+    db->log = NULL;
+    log->file = open(filename, O_RDONLY, S_IRUSR);
+    if (log->file >= 0) {
+        log_seek(log);
+        struct Record *tmp;
+        while ((tmp = log_read_next(log))) {
+            log->record = *tmp;
+            if (log->record.LSN > db->header.last_LSN)
+                db->header.last_LSN = log->record.LSN;
+            struct Chunk *node = node_read(db, log->record.chunk_offset);
+            if (node->LSN >= log->record.LSN) {
+                node_free(node);
+                continue;
+            }
+            switch(log->record.op) {
+                case 'd': {
+                    node->LSN = log->record.LSN;
+                    db->del(db, &(log->record.key));
+                    break;
+                }
+                case 'i': {}
+                case 'r': {
+                    node->LSN = log->record.LSN;
+                    db->put(db, &(log->record.key), &(log->record.data));
+                    break;
+                }
+                default:
+                    fprintf(stderr, "ERROR! Wrong operation in log.\n");
+            }
+            free(tmp->key.data);
+            free(tmp->data.data);
+            free(tmp);
+        }
+        close(log->file);
+    }
+}
+
+// Cache LRU
 
 void cache_init(struct DB *db) {
     db->cache.n = db->header.main_settings.mem_size / db->header.main_settings.chunk_size;
     db->cache.head = NULL;
 }
 
+
+//FIXME
 void cache_free(struct DB *db) {
     struct cache_list_node *curr = db->cache.head;
     while (curr) {
@@ -379,6 +506,10 @@ int insert(struct DB *db, struct Chunk *node, struct DBT *key, struct DBT *data)
 
 int dbput(struct DB *db, struct DBT *key, struct DBT *data) {
     //printf("inserting %s - %s...\n", (char *) key->data, (char *) data->data);
+    db->log->record.LSN = db->header.last_LSN += 1;
+    db->log->record.op = 'i';
+    db->log->record.key = *key;
+    db->log->record.data = *data;
     if (key->size + data->size > db->header.main_settings.chunk_size / 2) {
         // Data size is invalid
         return 1;
@@ -561,6 +692,9 @@ int del(struct DB *db, struct Chunk *node, struct DBT *key) {
 
 int dbdel(struct DB *db, struct DBT *key) {
     //printf("-------------------\ndeleting %s\n", (char *) key->data);
+    db->log->record.LSN = db->header.last_LSN += 1;
+    db->log->record.op = 'd';
+    db->log->record.key = *key;
     struct Chunk *root = node_get(db, db->header.root_offset);
     return del(db, root, key);
 }
@@ -568,6 +702,7 @@ int dbdel(struct DB *db, struct DBT *key) {
 // DB external managing
 
 int dbclose(struct DB *db) {
+    log_close(db->log);
     // Writing header
     db->write(db, (char *) &(db->header), sizeof(db->header), 0x0);
     // Close file
@@ -598,6 +733,7 @@ struct DB *dbcreate(char *file, struct DBC conf) {
     db->header.main_settings = conf;
     db->header.root_offset = sizeof(db->header);
     db->header.ff_offset = sizeof(db->header);
+    db->header.last_LSN = 0;
     db->write(db, (char *) &(db->header), sizeof(db->header), 0x0);
     // Init "first free" offsets
     const size_t db_size = db->header.main_settings.db_size;
@@ -607,6 +743,8 @@ struct DB *dbcreate(char *file, struct DBC conf) {
         dbwrite(db, (char *) &next_chunk_off, sizeof(next_chunk_off), chunk_off);
     }
     cache_init(db);
+    db->log = log_open(strcat(file, ".log"));
+
     // Add root
     struct Chunk *root = node_create(db);
     node_write(db, root);
@@ -621,6 +759,8 @@ struct DB *dbopen(char *file) {
     // Read header
     db->read(db, (char *) &(db->header), sizeof(db->header), 0x0);
     cache_init(db);
+    recovery(db, strcat(file, ".log"));
+    db->log = log_open(strcat(file, ".log"));
     return db;
 }
 
