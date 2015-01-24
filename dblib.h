@@ -54,12 +54,11 @@ struct Record {
     char op;
     struct DBT key;
     struct DBT data;
-    size_t chunk_offset;
 };
 
 struct Log {
     int file;
-    struct Record record;
+    //struct Record record;
 };
 
 struct Log *log_open(char *filename);
